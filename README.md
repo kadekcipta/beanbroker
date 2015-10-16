@@ -5,7 +5,7 @@ Go API implementation for simple registering *worker* and posting *jobs* to bean
 
 ### Simple usage
 
-```
+```go
 package main
 
 import (
