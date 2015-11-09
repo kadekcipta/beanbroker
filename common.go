@@ -30,9 +30,12 @@ type Worker interface {
 	// Do performs whatever the worker supposed to do
 	// upon finish or intentional break, return value will determine the job state
 	Do(context.Context, *Job) JobResult
+}
 
-	// Interest indicates what tube name that will be as share point
-	Interest() JobType
+type WorkerFunc func(context.Context, *Job) JobResult
+
+func (f WorkerFunc) Do(c context.Context, job *Job) JobResult {
+	return f(c, job)
 }
 
 // Job represents the beanstalkd job
@@ -53,7 +56,7 @@ type JobRequest struct {
 // JobBroker represents central contact point for worker and job poster
 type JobBroker interface {
 	// RegisterWorker registers the worker and a new connection to a tube is created
-	RegisterWorker(Worker)
+	RegisterWorker(w Worker, jobType JobType, reservationTimeout time.Duration)
 
 	// PostJob puts a job request to be dispatched to matched workers
 	PostJob(*JobRequest) error

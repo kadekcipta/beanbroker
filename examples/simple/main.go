@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/kadekcipta/beanbroker"
 	"golang.org/x/net/context"
@@ -16,36 +18,38 @@ func (e *echoWorker) Do(c context.Context, j *beanbroker.Job) beanbroker.JobResu
 	// print the data as string
 	fmt.Println(e.id, string(j.Data))
 
-	if string(j.Data) == "hello" {
+	if strings.HasSuffix(string(j.Data), "wait") {
 		// get the reference to the broker
 		b := c.Value(beanbroker.BrokerKey).(beanbroker.JobBroker)
 		// use it to post new data
 		b.PostJob(&beanbroker.JobRequest{
-			Type: "echo",
-			Data: []byte("beanstalkd !"),
+			Type:  "catcher",
+			Data:  []byte("beanstalkd !"),
+			Delay: time.Second * 5,
 		})
 	}
 	return beanbroker.Delete
 }
 
-func (e *echoWorker) Interest() beanbroker.JobType {
-	return "echo"
+func catcher(c context.Context, j *beanbroker.Job) beanbroker.JobResult {
+	fmt.Println("Catcher:", string(j.Data))
+	return beanbroker.Delete
 }
 
 func main() {
 	// create root context
 	c, cancel := context.WithCancel(context.Background())
 	// create connection
-	broker := beanbroker.New(c, "127.0.0.1:11300")
+	broker := beanbroker.New(c, "localhost:11300")
 
 	// register some collaborative workers
-	broker.RegisterWorker(&echoWorker{"Worker #1"})
-	broker.RegisterWorker(&echoWorker{"Worker #2"})
+	broker.RegisterWorker(&echoWorker{"Echoer"}, "echo", time.Minute)
+	broker.RegisterWorker(beanbroker.WorkerFunc(catcher), "catcher", time.Second*10)
 
 	// post a job
 	broker.PostJob(&beanbroker.JobRequest{
 		Type: "echo",
-		Data: []byte("hello"),
+		Data: []byte("hello..wait"),
 	})
 
 	// wait for enter key

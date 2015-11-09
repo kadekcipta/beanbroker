@@ -3,6 +3,7 @@ package beanbroker
 import (
 	"io"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -51,18 +52,20 @@ func mustCreateConnection(c context.Context, address string) *beanstalk.Conn {
 // beanWorkerHandler implements the beanstalkd worker handling
 // it will reserve a job and pass it to interest registered worker
 type beanWorkerHandler struct {
-	conn    *beanstalk.Conn
-	c       context.Context
-	address string
-	w       Worker
-	broker  JobBroker
+	conn               *beanstalk.Conn
+	c                  context.Context
+	address            string
+	w                  Worker
+	broker             JobBroker
+	jobType            JobType
+	reservationTimeout time.Duration
 }
 
 // pushJobs push the reserved job to worker
 func (p *beanWorkerHandler) pushJobs(w Worker) {
 	// create tubeset for topic
 	p.conn = mustCreateConnection(p.c, p.address)
-	tubeset := beanstalk.NewTubeSet(p.conn, string(w.Interest()))
+	tubeset := beanstalk.NewTubeSet(p.conn, string(p.jobType))
 
 	// create value context to store the reference to broker itself
 	ctx := context.WithValue(p.c, BrokerKey, p.broker)
@@ -74,7 +77,7 @@ func (p *beanWorkerHandler) pushJobs(w Worker) {
 			return
 		default:
 			// get the job
-			id, body, err := tubeset.Reserve(time.Minute)
+			id, body, err := tubeset.Reserve(p.reservationTimeout)
 
 			// if everything is fine
 			if err == nil {
@@ -83,7 +86,19 @@ func (p *beanWorkerHandler) pushJobs(w Worker) {
 				case Delete:
 					p.conn.Delete(id)
 				case Bury:
-					p.conn.Bury(id, 100)
+					// gets the current priority of the task
+					stats, err := p.conn.StatsJob(id)
+					if err != nil {
+						log.Println("worker:", err.Error())
+						continue
+					}
+					pri, err := strconv.Atoi(stats["pri"])
+					if err != nil {
+						log.Println("worker:", err.Error())
+						continue
+					}
+					// bury it with its original priority
+					p.conn.Bury(id, uint32(pri))
 				case Touch:
 					p.conn.Touch(id)
 				case Release:
@@ -101,7 +116,7 @@ func (p *beanWorkerHandler) pushJobs(w Worker) {
 			} else if possibleNetworkError(err.(beanstalk.ConnError).Err) {
 				// try reconnecting
 				p.conn = mustCreateConnection(p.c, p.address)
-				tubeset = beanstalk.NewTubeSet(p.conn, string(w.Interest()))
+				tubeset = beanstalk.NewTubeSet(p.conn, string(p.jobType))
 			} else {
 				log.Println("beanbroker:", err)
 			}
@@ -115,7 +130,6 @@ type beanJobPoster struct {
 	conn    *beanstalk.Conn
 	c       context.Context
 	address string
-	tube    *beanstalk.Tube
 }
 
 // post put a job in the tube specified by job's type
@@ -125,15 +139,15 @@ func (p *beanJobPoster) post(j *JobRequest) error {
 
 	if p.conn == nil {
 		p.conn = mustCreateConnection(p.c, p.address)
-		p.tube = &beanstalk.Tube{p.conn, string(j.Type)}
 	}
 
-	_, err := p.tube.Put(j.Data, j.Priority, j.Delay, j.TTR)
+	tube := &beanstalk.Tube{p.conn, string(j.Type)}
+
+	_, err := tube.Put(j.Data, j.Priority, j.Delay, j.TTR)
 	if err != nil {
 		if possibleNetworkError(err.(beanstalk.ConnError).Err) {
 			// invalidate to reset state for next call
 			p.conn = nil
-			p.tube = nil
 		}
 		return err
 	}
@@ -142,11 +156,20 @@ func (p *beanJobPoster) post(j *JobRequest) error {
 }
 
 // registerWorker registers a worker including the JobBroker reference
-func registerWorker(c context.Context, broker JobBroker, address string, w Worker) {
+func registerWorker(
+	c context.Context,
+	broker JobBroker,
+	address string,
+	w Worker,
+	jobType JobType,
+	reservationTimeout time.Duration,
+) {
 	wh := &beanWorkerHandler{
-		c:       c,
-		address: address,
-		broker:  broker,
+		c:                  c,
+		address:            address,
+		broker:             broker,
+		jobType:            jobType,
+		reservationTimeout: reservationTimeout,
 	}
 
 	go wh.pushJobs(w)
@@ -159,8 +182,12 @@ type beanBroker struct {
 	jobPoster *beanJobPoster
 }
 
-func (b *beanBroker) RegisterWorker(w Worker) {
-	registerWorker(b.c, b, b.address, w)
+func (b *beanBroker) RegisterWorker(
+	w Worker,
+	jobType JobType,
+	reservationTimeout time.Duration,
+) {
+	registerWorker(b.c, b, b.address, w, jobType, reservationTimeout)
 }
 
 func (b *beanBroker) PostJob(j *JobRequest) error {
